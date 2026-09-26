@@ -1,0 +1,6 @@
+{
+  "name": "Law Counsel - Indian Contract & Clause Checker",
+  "description": "Demystifying Indian rental agreements, job offer letters, freelance contracts, and NDAs with plain-English clause breakdowns and statutory benchmarks.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
