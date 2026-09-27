@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { ClauseSeverity, ScreenId } from '../../types';
 import { SAMPLE_TEMPLATES } from '../../data/mockData';
 
@@ -30,6 +30,19 @@ interface ContractAnalysisResult {
   emailBody: string;
 }
 
+export interface UploadedDocumentMeta {
+  id: string;
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+  uploadedAt: string;
+  pageCount?: number;
+  wordCount: number;
+  preview: string;
+  downloadUrl: string;
+  extractedText?: string;
+}
+
 interface AnalyzeContractScreenProps {
   onNavigate: (screen: ScreenId) => void;
   onShowToast: (msg: string) => void;
@@ -46,8 +59,31 @@ export const AnalyzeContractScreen: React.FC<AnalyzeContractScreenProps> = ({
   const [isAuditing, setIsAuditing] = useState(false);
   const [auditStepMessage, setAuditStepMessage] = useState<string>('Analyzing clauses...');
   const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
+  const [uploadedDoc, setUploadedDoc] = useState<UploadedDocumentMeta | null>(null);
+  const [isUploading, setIsUploading] = useState<boolean>(false);
+  const [uploadProgressText, setUploadProgressText] = useState<string>('');
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [recentDocuments, setRecentDocuments] = useState<UploadedDocumentMeta[]>([]);
+  const [isDragging, setIsDragging] = useState<boolean>(false);
+  const [showExtractedPreview, setShowExtractedPreview] = useState<boolean>(true);
   const [analysisResult, setAnalysisResult] = useState<ContractAnalysisResult | null>(null);
   const [copiedNegotiation, setCopiedNegotiation] = useState(false);
+
+  const fetchRecentDocuments = async () => {
+    try {
+      const res = await fetch('/api/documents');
+      if (res.ok) {
+        const docs = await res.json();
+        setRecentDocuments(docs);
+      }
+    } catch (err) {
+      console.warn('Could not fetch stored documents:', err);
+    }
+  };
+
+  useEffect(() => {
+    fetchRecentDocuments();
+  }, []);
 
   const handleTemplateSelect = (key: string) => {
     const tmpl = SAMPLE_TEMPLATES[key];
@@ -55,7 +91,150 @@ export const AnalyzeContractScreen: React.FC<AnalyzeContractScreenProps> = ({
       setContractText(tmpl.contractText);
       setContractCategory(tmpl.categoryKey);
       setUploadedFileName(null);
+      setUploadedDoc(null);
+      setUploadError(null);
       onShowToast(`Loaded ${tmpl.title}`);
+    }
+  };
+
+  const processSelectedFile = async (file: File) => {
+    setUploadError(null);
+
+    // 1. File size validation (15MB limit)
+    const MAX_FILE_SIZE = 15 * 1024 * 1024;
+    if (file.size > MAX_FILE_SIZE) {
+      const msg = `File "${file.name}" exceeds the 15MB limit (${(file.size / (1024 * 1024)).toFixed(1)}MB). Please upload a smaller document.`;
+      setUploadError(msg);
+      onShowToast(msg);
+      return;
+    }
+
+    // 2. File extension check
+    const lowerName = file.name.toLowerCase();
+    const validExtensions = ['.pdf', '.docx', '.doc', '.txt'];
+    const hasValidExt = validExtensions.some((ext) => lowerName.endsWith(ext));
+    if (!hasValidExt) {
+      const msg = `Unsupported file type "${file.name}". Please upload a PDF (.pdf), Word document (.docx), or plain text (.txt) file.`;
+      setUploadError(msg);
+      onShowToast(msg);
+      return;
+    }
+
+    setIsUploading(true);
+    setUploadProgressText(
+      lowerName.endsWith('.pdf')
+        ? 'Uploading and parsing PDF text & clauses...'
+        : 'Uploading and extracting document text...'
+    );
+
+    try {
+      // Read binary file as Base64 data URL
+      const base64Data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve((reader.result as string) || '');
+        reader.onerror = () => reject(new Error('Failed reading file from local storage.'));
+        reader.readAsDataURL(file);
+      });
+
+      const response = await fetch('/api/documents/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fileName: file.name,
+          fileBase64: base64Data,
+          mimeType: file.type || (lowerName.endsWith('.pdf') ? 'application/pdf' : 'text/plain'),
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || `Server rejected upload with HTTP ${response.status}`);
+      }
+
+      const docData: UploadedDocumentMeta & { extractedText: string } = await response.json();
+      setContractText(docData.extractedText);
+      setUploadedDoc(docData);
+      setUploadedFileName(docData.fileName);
+      setUploadError(null);
+      onShowToast(`Document "${docData.fileName}" successfully parsed! (${docData.wordCount} words)`);
+      fetchRecentDocuments();
+    } catch (err: any) {
+      console.error('Document upload error:', err);
+      const msg = err.message || 'Failed to process document. Please check the file and try again.';
+      setUploadError(msg);
+      onShowToast(`Upload failed: ${msg}`);
+    } finally {
+      setIsUploading(false);
+      setUploadProgressText('');
+    }
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      processSelectedFile(file);
+    }
+    // reset input value so re-uploading the same file works
+    e.target.value = '';
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) {
+      processSelectedFile(file);
+    }
+  };
+
+  const handleLoadStoredDocument = async (doc: UploadedDocumentMeta) => {
+    try {
+      setIsUploading(true);
+      setUploadProgressText(`Loading "${doc.fileName}"...`);
+      const res = await fetch(`/api/documents/${doc.id}`);
+      if (!res.ok) {
+        throw new Error('Document no longer available on server.');
+      }
+      const fullDoc = await res.json();
+      setContractText(fullDoc.extractedText);
+      setUploadedDoc(fullDoc);
+      setUploadedFileName(fullDoc.fileName);
+      setUploadError(null);
+      onShowToast(`Loaded "${fullDoc.fileName}" into analyzer.`);
+    } catch (err: any) {
+      onShowToast(`Could not load document: ${err.message}`);
+    } finally {
+      setIsUploading(false);
+      setUploadProgressText('');
+    }
+  };
+
+  const handleDeleteStoredDocument = async (docId: string, docName: string) => {
+    try {
+      const res = await fetch(`/api/documents/${docId}`, { method: 'DELETE' });
+      if (res.ok) {
+        if (uploadedDoc?.id === docId) {
+          setUploadedDoc(null);
+          setUploadedFileName(null);
+        }
+        onShowToast(`Deleted "${docName}"`);
+        fetchRecentDocuments();
+      }
+    } catch (err: any) {
+      onShowToast(`Failed to delete: ${err.message}`);
     }
   };
 
@@ -113,24 +292,11 @@ export const AnalyzeContractScreen: React.FC<AnalyzeContractScreenProps> = ({
     }
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setUploadedFileName(file.name);
-      onShowToast(`File "${file.name}" loaded into editor.`);
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const text = (event.target?.result as string) || '';
-        setContractText(text);
-        setActiveTab('paste');
-      };
-      reader.readAsText(file);
-    }
-  };
-
   const handleClear = () => {
     setContractText('');
     setUploadedFileName(null);
+    setUploadedDoc(null);
+    setUploadError(null);
     setAnalysisResult(null);
     onShowToast('Editor cleared');
   };
@@ -264,6 +430,38 @@ export const AnalyzeContractScreen: React.FC<AnalyzeContractScreenProps> = ({
         {/* Tab 1: Direct Text Editor */}
         {activeTab === 'paste' && (
           <div className="relative">
+            {uploadedDoc && (
+              <div className="mb-3 px-3.5 py-2.5 bg-[#eff4ff] border border-[#d5e3fc] rounded-xl flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-2">
+                  <span className="material-symbols-outlined text-base text-[#0051d5]">description</span>
+                  <span className="font-semibold text-[#00236f]">Loaded: {uploadedDoc.fileName}</span>
+                  <span className="text-[#444651]">
+                    ({(uploadedDoc.fileSize / 1024).toFixed(1)} KB
+                    {uploadedDoc.pageCount ? ` • ${uploadedDoc.pageCount} ${uploadedDoc.pageCount === 1 ? 'page' : 'pages'}` : ''}
+                    {` • ${uploadedDoc.wordCount} words`})
+                  </span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <a
+                    href={uploadedDoc.downloadUrl}
+                    download={uploadedDoc.fileName}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-[#0051d5] hover:text-[#00236f] font-bold"
+                  >
+                    <span className="material-symbols-outlined text-sm">download</span>
+                    <span>Retrieve File</span>
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('upload')}
+                    className="text-[#444651] hover:text-[#00236f] font-medium underline cursor-pointer"
+                  >
+                    Upload Tab
+                  </button>
+                </div>
+              </div>
+            )}
             <label className="sr-only" htmlFor="contract-editor-textarea">
               Contract Text Editor
             </label>
@@ -273,6 +471,7 @@ export const AnalyzeContractScreen: React.FC<AnalyzeContractScreenProps> = ({
               onChange={(e) => {
                 setContractText(e.target.value);
                 setUploadedFileName(null);
+                setUploadedDoc(null);
               }}
               className="w-full bg-[#f8f9ff] rounded-xl p-4 sm:p-5 text-xs sm:text-sm font-mono text-[#0d1c2e] focus:outline-none focus:ring-2 focus:ring-[#0051d5] shadow-inner leading-relaxed resize-y min-h-[220px] border border-[#d5e3fc]"
               placeholder="Paste your Indian rental contract, offer letter, service agreement, or NDA clauses here..."
@@ -286,38 +485,237 @@ export const AnalyzeContractScreen: React.FC<AnalyzeContractScreenProps> = ({
 
         {/* Tab 2: Document Upload */}
         {activeTab === 'upload' && (
-          <div className="border-2 border-dashed border-[#c5c5d3] rounded-xl p-8 sm:p-12 text-center bg-[#f8f9ff] hover:bg-[#eff4ff] transition-colors">
-            <div className="w-14 h-14 rounded-full bg-[#eff4ff] flex items-center justify-center text-[#00236f] mx-auto mb-3 border border-[#d5e3fc]">
-              <span className="material-symbols-outlined text-3xl">upload_file</span>
+          <div className="space-y-6">
+            {/* Upload Zone */}
+            <div
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              className={`border-2 border-dashed rounded-xl p-6 sm:p-10 text-center transition-all ${
+                isDragging
+                  ? 'border-[#0051d5] bg-[#eff4ff]'
+                  : 'border-[#c5c5d3] bg-[#f8f9ff] hover:bg-[#eff4ff]/60'
+              }`}
+            >
+              {isUploading ? (
+                <div className="py-6 flex flex-col items-center justify-center gap-3">
+                  <div className="w-12 h-12 rounded-full border-3 border-[#0051d5] border-t-transparent animate-spin"></div>
+                  <p className="text-sm font-bold text-[#00236f]">{uploadProgressText || 'Processing document...'}</p>
+                  <p className="text-xs text-[#444651]">Validating file, extracting text clauses, and preparing storage...</p>
+                </div>
+              ) : (
+                <>
+                  <div className="w-14 h-14 rounded-full bg-[#eff4ff] flex items-center justify-center text-[#00236f] mx-auto mb-3 border border-[#d5e3fc]">
+                    <span className="material-symbols-outlined text-3xl">upload_file</span>
+                  </div>
+                  <h2 className="text-lg sm:text-xl font-bold text-[#00236f] mb-1">
+                    Select or drag & drop your contract document
+                  </h2>
+                  <p className="text-xs sm:text-sm text-[#444651] max-w-lg mx-auto mb-4">
+                    Supports <strong>PDF (.pdf)</strong>, Word documents (<strong>.docx</strong>), and Plain Text (<strong>.txt</strong>).
+                    Parsed and stored securely on server with direct file retrieval.
+                  </p>
+
+                  <div className="flex flex-wrap items-center justify-center gap-2 mb-4">
+                    <span className="px-2.5 py-1 bg-white border border-[#d5e3fc] rounded-md text-[11px] font-semibold text-[#00236f]">
+                      📄 PDF text & OCR
+                    </span>
+                    <span className="px-2.5 py-1 bg-white border border-[#d5e3fc] rounded-md text-[11px] font-semibold text-[#00236f]">
+                      📝 Word .docx
+                    </span>
+                    <span className="px-2.5 py-1 bg-white border border-[#d5e3fc] rounded-md text-[11px] font-semibold text-[#00236f]">
+                      ⚖️ Max 15MB limit
+                    </span>
+                  </div>
+
+                  {uploadError && (
+                    <div className="mb-4 mx-auto max-w-md p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2 text-left">
+                      <span className="material-symbols-outlined text-rose-600 text-base shrink-0 mt-0.5">error</span>
+                      <div className="flex-1">
+                        <strong className="block font-semibold">Upload Error</strong>
+                        <span>{uploadError}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setUploadError(null)}
+                        className="text-rose-600 hover:text-rose-800 text-sm font-bold cursor-pointer"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  )}
+
+                  <div>
+                    <label
+                      htmlFor="file-upload-input"
+                      className="inline-flex items-center gap-2 bg-[#00236f] text-white px-5 py-2.5 rounded-lg text-xs font-bold hover:bg-[#0051d5] transition-colors cursor-pointer shadow-xs"
+                    >
+                      <span className="material-symbols-outlined text-base">attach_file</span>
+                      <span>Browse Files</span>
+                    </label>
+                    <input
+                      id="file-upload-input"
+                      type="file"
+                      className="hidden"
+                      accept=".txt,.doc,.docx,.pdf,application/pdf"
+                      onChange={handleFileUpload}
+                    />
+                  </div>
+                </>
+              )}
             </div>
-            <h2 className="text-lg sm:text-xl font-bold text-[#00236f] mb-1">
-              Select your agreement document
-            </h2>
-            <p className="text-xs sm:text-sm text-[#444651] max-w-md mx-auto mb-4">
-              Upload your agreement file (.txt, .pdf, .docx). Processed ephemerally in-memory.
-            </p>
-            {uploadedFileName && (
-              <div className="mb-4 inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-800 text-xs font-semibold border border-emerald-200">
-                <span className="material-symbols-outlined text-emerald-600 text-base">check_circle</span>
-                <span>Loaded: {uploadedFileName}</span>
+
+            {/* Currently Active Loaded Document Card */}
+            {uploadedDoc && (
+              <div className="bg-white rounded-xl border border-emerald-200 p-5 shadow-xs">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-[#f1f5f9]">
+                  <div className="flex items-start gap-3">
+                    <div className="w-12 h-12 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center border border-emerald-200 shrink-0">
+                      <span className="material-symbols-outlined text-2xl">
+                        {uploadedDoc.mimeType.includes('pdf') || uploadedDoc.fileName.endsWith('.pdf')
+                          ? 'picture_as_pdf'
+                          : 'description'}
+                      </span>
+                    </div>
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2 mb-1">
+                        <h3 className="font-bold text-[#0d1c2e] text-sm sm:text-base">
+                          {uploadedDoc.fileName}
+                        </h3>
+                        <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-100 text-emerald-800">
+                          {uploadedDoc.mimeType.includes('pdf') || uploadedDoc.fileName.endsWith('.pdf')
+                            ? 'PDF Document'
+                            : 'Document'}
+                        </span>
+                      </div>
+                      <p className="text-xs text-[#444651]">
+                        Size: {(uploadedDoc.fileSize / 1024).toFixed(1)} KB
+                        {uploadedDoc.pageCount ? ` • Pages: ${uploadedDoc.pageCount}` : ''}
+                        {` • Words: ${uploadedDoc.wordCount}`}
+                        {` • Uploaded: ${new Date(uploadedDoc.uploadedAt).toLocaleTimeString()}`}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <a
+                      href={uploadedDoc.downloadUrl}
+                      download={uploadedDoc.fileName}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 bg-[#eff4ff] text-[#00236f] hover:bg-[#dce9ff] px-3.5 py-2 rounded-lg text-xs font-bold border border-[#d5e3fc] transition-colors"
+                      title="Download and retrieve original uploaded file"
+                    >
+                      <span className="material-symbols-outlined text-base">download</span>
+                      <span>Retrieve File</span>
+                    </a>
+
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('paste')}
+                      className="inline-flex items-center gap-1.5 bg-[#f8f9ff] text-[#444651] hover:text-[#0d1c2e] px-3 py-2 rounded-lg text-xs font-bold border border-[#c5c5d3] transition-colors cursor-pointer"
+                    >
+                      <span className="material-symbols-outlined text-base">edit</span>
+                      <span>Edit Text</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Extracted Text Preview */}
+                <div className="mt-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-bold text-[#00236f] uppercase tracking-wider">
+                      Extracted Text Preview ({uploadedDoc.wordCount} words)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowExtractedPreview(!showExtractedPreview)}
+                      className="text-xs text-[#0051d5] hover:underline font-semibold cursor-pointer"
+                    >
+                      {showExtractedPreview ? 'Hide Preview' : 'Show Preview'}
+                    </button>
+                  </div>
+
+                  {showExtractedPreview && (
+                    <div className="p-3 bg-[#f8f9ff] rounded-lg border border-[#e2e8f0] max-h-48 overflow-y-auto text-xs font-mono text-[#334155] whitespace-pre-wrap leading-relaxed">
+                      {contractText || uploadedDoc.preview || 'No preview available.'}
+                    </div>
+                  )}
+                </div>
               </div>
             )}
-            <div>
-              <label
-                htmlFor="file-upload-input"
-                className="inline-flex items-center gap-2 bg-[#00236f] text-white px-5 py-2.5 rounded-lg text-xs font-bold hover:bg-[#0051d5] transition-colors cursor-pointer shadow-xs"
-              >
-                <span className="material-symbols-outlined text-base">attach_file</span>
-                <span>Choose Document</span>
-              </label>
-              <input
-                id="file-upload-input"
-                type="file"
-                className="hidden"
-                accept=".txt,.doc,.docx,.pdf"
-                onChange={handleFileUpload}
-              />
-            </div>
+
+            {/* Recent & Stored Documents List */}
+            {recentDocuments.length > 0 && (
+              <div className="bg-white rounded-xl border border-[#e2e8f0] p-5 shadow-xs">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <span className="material-symbols-outlined text-[#0051d5] text-lg">history_edu</span>
+                    <h3 className="font-bold text-[#00236f] text-sm">
+                      Stored Documents ({recentDocuments.length})
+                    </h3>
+                  </div>
+                  <span className="text-xs text-[#444651]">
+                    Click to load or retrieve original file
+                  </span>
+                </div>
+
+                <div className="divide-y divide-[#f1f5f9]">
+                  {recentDocuments.map((doc) => (
+                    <div
+                      key={doc.id}
+                      className="py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-[#f8f9ff] px-2 rounded-lg transition-colors"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <span className="material-symbols-outlined text-lg text-[#0051d5] shrink-0">
+                          {doc.mimeType.includes('pdf') || doc.fileName.endsWith('.pdf')
+                            ? 'picture_as_pdf'
+                            : 'description'}
+                        </span>
+                        <div className="min-w-0">
+                          <p className="text-xs font-bold text-[#0d1c2e] truncate">{doc.fileName}</p>
+                          <p className="text-[11px] text-[#444651]">
+                            {(doc.fileSize / 1024).toFixed(1)} KB
+                            {doc.pageCount ? ` • ${doc.pageCount} ${doc.pageCount === 1 ? 'page' : 'pages'}` : ''}
+                            {` • ${doc.wordCount} words`}
+                            {` • ${new Date(doc.uploadedAt).toLocaleDateString()}`}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 self-end sm:self-center">
+                        <button
+                          type="button"
+                          onClick={() => handleLoadStoredDocument(doc)}
+                          className="px-2.5 py-1.5 rounded-md bg-[#eff4ff] text-[#00236f] text-xs font-semibold hover:bg-[#dce9ff] border border-[#d5e3fc] transition-colors cursor-pointer"
+                        >
+                          Load
+                        </button>
+                        <a
+                          href={doc.downloadUrl}
+                          download={doc.fileName}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="px-2.5 py-1.5 rounded-md bg-white text-[#444651] hover:text-[#00236f] text-xs font-semibold border border-[#c5c5d3] hover:border-[#00236f] transition-colors inline-flex items-center gap-1"
+                          title="Download stored original document"
+                        >
+                          <span className="material-symbols-outlined text-xs">download</span>
+                          <span>Retrieve</span>
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteStoredDocument(doc.id, doc.fileName)}
+                          className="p-1.5 rounded-md text-[#64748b] hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
+                          title="Delete stored file"
+                        >
+                          <span className="material-symbols-outlined text-sm">delete</span>
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -326,7 +724,7 @@ export const AnalyzeContractScreen: React.FC<AnalyzeContractScreenProps> = ({
           <div className="flex flex-wrap items-center gap-4 text-xs text-[#444651]">
             <div className="flex items-center gap-1.5 text-[#0d1c2e] font-medium">
               <span className="material-symbols-outlined text-sm text-[#0051d5]">lock</span>
-              <span><strong>Zero Data Retention:</strong> Processed in volatile memory, never stored</span>
+              <span><strong>Confidential & Secure:</strong> Audited locally with on-demand retrieval</span>
             </div>
             <div className="flex items-center gap-1.5 text-[#0d1c2e] font-medium">
               <span className="material-symbols-outlined text-sm text-[#0051d5]">account_balance</span>
