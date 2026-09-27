@@ -225,6 +225,55 @@ async function startServer() {
     });
   });
 
+  // POST upload logo - Saves user uploaded logo file directly as public/logo.jpg & public/logo.png
+  app.post(['/api/upload-logo', '/.netlify/functions/upload-logo'], async (req: Request, res: Response) => {
+    try {
+      const { fileName, fileBase64, mimeType } = req.body;
+      if (!fileBase64 || typeof fileBase64 !== 'string') {
+        return res.status(400).json({ error: 'Missing fileBase64 in request body.' });
+      }
+
+      const cleanBase64 = fileBase64.replace(/^data:[^;]+;base64,/, '');
+      const buffer = Buffer.from(cleanBase64, 'base64');
+      if (buffer.length === 0) {
+        return res.status(400).json({ error: 'Uploaded logo file is empty.' });
+      }
+
+      const publicDir = path.resolve(__dirname, 'public');
+      if (!fs.existsSync(publicDir)) {
+        fs.mkdirSync(publicDir, { recursive: true });
+      }
+
+      const ext = (path.extname(fileName || '') || (mimeType?.includes('png') ? '.png' : '.jpg')).toLowerCase();
+      const isPng = ext === '.png';
+
+      const targetJpg = path.join(publicDir, 'logo.jpg');
+      const targetPng = path.join(publicDir, 'logo.png');
+
+      fs.writeFileSync(targetJpg, buffer);
+      fs.writeFileSync(targetPng, buffer);
+
+      // Also mirror to dist if build exists
+      const distDir = path.resolve(__dirname, 'dist');
+      if (fs.existsSync(distDir)) {
+        fs.writeFileSync(path.join(distDir, 'logo.jpg'), buffer);
+        fs.writeFileSync(path.join(distDir, 'logo.png'), buffer);
+      }
+
+      console.log(`Logo updated successfully (${buffer.length} bytes) as logo.jpg and logo.png`);
+
+      return res.status(200).json({
+        success: true,
+        message: 'Logo saved directly to public/logo.jpg and public/logo.png unmodified.',
+        url: isPng ? '/logo.png' : '/logo.jpg',
+        size: buffer.length,
+      });
+    } catch (err: any) {
+      console.error('Failed to save logo:', err);
+      return res.status(500).json({ error: err.message || 'Failed to save logo.' });
+    }
+  });
+
   // POST upload - Upload, validate, parse, and store contract documents (PDF, DOCX, TXT)
   app.post(
     ['/api/documents/upload', '/.netlify/functions/upload', '/.netlify/functions/documents/upload'],

@@ -1,5 +1,6 @@
 import React from 'react';
 import { ScreenId } from '../types';
+import { LOGO_URL } from '../data/mockData';
 
 interface FooterProps {
   onNavigate: (screen: ScreenId) => void;
@@ -12,7 +13,22 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-8 mb-8">
           {/* Col 1: About */}
           <div className="space-y-3 sm:col-span-2 md:col-span-1">
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-2.5">
+              <img
+                src={LOGO_URL}
+                alt="Law Counsel Logo"
+                className="h-7 w-7 aspect-square rounded-lg object-contain shrink-0 shadow-xs"
+                width="28"
+                height="28"
+                loading="lazy"
+                referrerPolicy="no-referrer"
+                onError={(e) => {
+                  const target = e.currentTarget;
+                  if (!target.src.includes('logo.png')) {
+                    target.src = '/logo.png';
+                  }
+                }}
+              />
               <span className="text-xl font-bold text-[#00236f] tracking-tight">Law Counsel</span>
             </div>
             <p className="text-xs md:text-sm text-[#444651] leading-relaxed">

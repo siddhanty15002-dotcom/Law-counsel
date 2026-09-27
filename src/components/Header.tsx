@@ -15,6 +15,48 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [lang, setLang] = useState<'EN' | 'HI'>('EN');
+  const [logoSrc, setLogoSrc] = useState<string>(LOGO_URL);
+  const [isUploadingLogo, setIsUploadingLogo] = useState(false);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+  const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsUploadingLogo(true);
+    try {
+      const reader = new FileReader();
+      reader.onload = async () => {
+        try {
+          const base64 = reader.result as string;
+          const res = await fetch('/api/upload-logo', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              fileName: file.name,
+              fileBase64: base64,
+              mimeType: file.type,
+            }),
+          });
+          const data = await res.json();
+          if (res.ok) {
+            const newUrl = `${data.url || '/logo.jpg'}?t=${Date.now()}`;
+            setLogoSrc(newUrl);
+            onShowToast('Brand logo updated and saved directly to public/logo.jpg!');
+          } else {
+            onShowToast(data.error || 'Failed to update logo.');
+          }
+        } catch (err: any) {
+          onShowToast('Error saving logo image file.');
+        } finally {
+          setIsUploadingLogo(false);
+        }
+      };
+      reader.readAsDataURL(file);
+    } catch {
+      setIsUploadingLogo(false);
+    }
+  };
 
   const navItems: { id: ScreenId; label: string }[] = [
     { id: 'analyze-contract', label: 'Analyze Contract' },
@@ -51,28 +93,56 @@ export const Header: React.FC<HeaderProps> = ({
       {/* Main Navigation Bar */}
       <div className="h-16 md:h-20 max-w-7xl mx-auto px-4 sm:px-8 flex items-center justify-between gap-4">
         {/* Brand Zone */}
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => onNavigate('analyze-contract')}
-            className="flex items-center gap-2.5 text-left focus:outline-none group cursor-pointer"
-            type="button"
-          >
-            <img
-              alt="Law Counsel Logo"
-              className="h-8 md:h-9 w-auto object-contain transition-transform group-hover:scale-105"
-              src={LOGO_URL}
-            />
-            <div className="flex flex-col">
-              <div className="flex items-center gap-1.5 flex-wrap">
-                <span className="font-bold text-lg md:text-xl text-[#00236f] tracking-tight">
-                  Law Counsel
-                </span>
-                <span className="bg-[#d5e3fc] text-[#00236f] text-[10px] md:text-[11px] font-bold px-2 py-0.5 rounded-full whitespace-nowrap">
-                  Clause Checker • India
-                </span>
+        <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleLogoUpload}
+            accept="image/png,image/jpeg,image/jpg"
+            className="hidden"
+          />
+          <div className="relative group shrink-0">
+            <button
+              onClick={() => onNavigate('analyze-contract')}
+              className="flex items-center gap-2.5 sm:gap-3 text-left focus:outline-none cursor-pointer min-w-0"
+              type="button"
+            >
+              <div className="relative shrink-0 flex items-center justify-center overflow-hidden rounded-xl border border-black/5 bg-slate-900/5 shadow-xs transition-transform duration-200 group-hover:scale-105">
+                <img
+                  alt="Law Counsel Logo"
+                  className="h-9 w-9 sm:h-10 sm:w-10 md:h-11 md:w-11 aspect-square shrink-0 object-contain p-0.5"
+                  src={logoSrc}
+                  width="44"
+                  height="44"
+                  loading="eager"
+                  referrerPolicy="no-referrer"
+                  onError={() => {
+                    if (logoSrc !== '/logo.png') {
+                      setLogoSrc('/logo.png');
+                    }
+                  }}
+                />
               </div>
-            </div>
-          </button>
+              <div className="flex flex-col min-w-0">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="font-bold text-base sm:text-lg md:text-xl text-[#00236f] tracking-tight truncate">
+                    Law Counsel
+                  </span>
+                  <span className="inline-flex bg-[#d5e3fc] text-[#00236f] text-[9px] sm:text-[10px] md:text-[11px] font-bold px-1.5 sm:px-2 py-0.5 rounded-full whitespace-nowrap">
+                    Clause Checker • India
+                  </span>
+                </div>
+              </div>
+            </button>
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              title="Upload / Replace brand logo file (saves directly as public/logo.jpg)"
+              className="absolute -bottom-1 -right-1 opacity-0 group-hover:opacity-100 transition-opacity bg-white hover:bg-slate-50 text-slate-700 rounded-full p-1 shadow-md border border-slate-200 cursor-pointer flex items-center justify-center text-[10px]"
+            >
+              <span className="material-symbols-outlined text-xs">upload</span>
+            </button>
+          </div>
         </div>
 
         {/* Desktop Navigation Links */}
