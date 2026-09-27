@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { ClauseSeverity, ScreenId } from '../../types';
 import { SAMPLE_TEMPLATES } from '../../data/mockData';
+import { API_ENDPOINTS } from '../../config/apiEndpoints';
 
 interface ClauseItem {
   id: number;
@@ -71,7 +72,10 @@ export const AnalyzeContractScreen: React.FC<AnalyzeContractScreenProps> = ({
 
   const fetchRecentDocuments = async () => {
     try {
-      const res = await fetch('/api/documents');
+      let res = await fetch(API_ENDPOINTS.DOCUMENTS);
+      if (res.status === 404) {
+        res = await fetch(API_ENDPOINTS.FALLBACK_DOCUMENTS);
+      }
       if (res.ok) {
         const docs = await res.json();
         setRecentDocuments(docs);
@@ -128,6 +132,9 @@ export const AnalyzeContractScreen: React.FC<AnalyzeContractScreenProps> = ({
     );
 
     try {
+      // Local blob fallback for immediate retrieval
+      const localBlobUrl = URL.createObjectURL(file);
+
       // Read binary file as Base64 data URL
       const base64Data = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
@@ -136,7 +143,8 @@ export const AnalyzeContractScreen: React.FC<AnalyzeContractScreenProps> = ({
         reader.readAsDataURL(file);
       });
 
-      const response = await fetch('/api/documents/upload', {
+      // Call Netlify Function URL
+      let response = await fetch(API_ENDPOINTS.UPLOAD_DOCUMENT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -146,12 +154,29 @@ export const AnalyzeContractScreen: React.FC<AnalyzeContractScreenProps> = ({
         }),
       });
 
+      // Fallback if running on legacy server without Netlify function routing
+      if (response.status === 404) {
+        response = await fetch(API_ENDPOINTS.FALLBACK_UPLOAD, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fileName: file.name,
+            fileBase64: base64Data,
+            mimeType: file.type || (lowerName.endsWith('.pdf') ? 'application/pdf' : 'text/plain'),
+          }),
+        });
+      }
+
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
         throw new Error(errorData.error || `Server rejected upload with HTTP ${response.status}`);
       }
 
       const docData: UploadedDocumentMeta & { extractedText: string } = await response.json();
+      // Ensure download URL is valid
+      if (!docData.downloadUrl) {
+        docData.downloadUrl = API_ENDPOINTS.DOWNLOAD_DOCUMENT(docData.id) || localBlobUrl;
+      }
       setContractText(docData.extractedText);
       setUploadedDoc(docData);
       setUploadedFileName(docData.fileName);
@@ -204,7 +229,10 @@ export const AnalyzeContractScreen: React.FC<AnalyzeContractScreenProps> = ({
     try {
       setIsUploading(true);
       setUploadProgressText(`Loading "${doc.fileName}"...`);
-      const res = await fetch(`/api/documents/${doc.id}`);
+      let res = await fetch(API_ENDPOINTS.GET_DOCUMENT(doc.id));
+      if (res.status === 404) {
+        res = await fetch(`/api/documents/${doc.id}`);
+      }
       if (!res.ok) {
         throw new Error('Document no longer available on server.');
       }
@@ -224,7 +252,10 @@ export const AnalyzeContractScreen: React.FC<AnalyzeContractScreenProps> = ({
 
   const handleDeleteStoredDocument = async (docId: string, docName: string) => {
     try {
-      const res = await fetch(`/api/documents/${docId}`, { method: 'DELETE' });
+      let res = await fetch(API_ENDPOINTS.DELETE_DOCUMENT(docId), { method: 'DELETE' });
+      if (res.status === 404) {
+        res = await fetch(`/api/documents/${docId}`, { method: 'DELETE' });
+      }
       if (res.ok) {
         if (uploadedDoc?.id === docId) {
           setUploadedDoc(null);
@@ -257,7 +288,8 @@ export const AnalyzeContractScreen: React.FC<AnalyzeContractScreenProps> = ({
     }, 2500);
 
     try {
-      const response = await fetch('/api/analyze-contract', {
+      // Call Netlify Function URL
+      let response = await fetch(API_ENDPOINTS.ANALYZE_CONTRACT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -265,6 +297,18 @@ export const AnalyzeContractScreen: React.FC<AnalyzeContractScreenProps> = ({
           category: contractCategory,
         }),
       });
+
+      // Fallback if running on legacy server without function routing
+      if (response.status === 404) {
+        response = await fetch(API_ENDPOINTS.FALLBACK_ANALYZE, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contractText: trimmed,
+            category: contractCategory,
+          }),
+        });
+      }
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));

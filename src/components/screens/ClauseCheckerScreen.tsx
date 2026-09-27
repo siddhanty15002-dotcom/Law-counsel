@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ScreenId } from '../../types';
 import { ADVOCATE_ROOM_IMAGE, FAQ_ITEMS } from '../../data/mockData';
+import { API_ENDPOINTS } from '../../config/apiEndpoints';
 
 interface ClauseExplanation {
   riskLevel: 'high' | 'warning' | 'fair';
@@ -58,7 +59,8 @@ export const ClauseCheckerScreen: React.FC<ClauseCheckerScreenProps> = ({
 
     setIsAnalyzing(true);
     try {
-      const response = await fetch('/api/explain-clause', {
+      // Call Netlify Function URL
+      let response = await fetch(API_ENDPOINTS.EXPLAIN_CLAUSE, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -66,6 +68,18 @@ export const ClauseCheckerScreen: React.FC<ClauseCheckerScreenProps> = ({
           queryType: activePrompt,
         }),
       });
+
+      // Fallback if running on legacy server without function routing
+      if (response.status === 404) {
+        response = await fetch(API_ENDPOINTS.FALLBACK_EXPLAIN, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            clauseText: text,
+            queryType: activePrompt,
+          }),
+        });
+      }
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));

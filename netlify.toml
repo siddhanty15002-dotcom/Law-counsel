@@ -1,0 +1,50 @@
+[build]
+  publish = "dist"
+  command = "npm run build"
+  functions = "netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
+  external_node_modules = ["pdf-parse", "mammoth", "@google/genai"]
+
+# Route API calls to Netlify functions seamlessly
+[[redirects]]
+  from = "/api/documents/upload"
+  to = "/.netlify/functions/upload"
+  status = 200
+
+[[redirects]]
+  from = "/api/analyze-contract"
+  to = "/.netlify/functions/analyze-contract"
+  status = 200
+
+[[redirects]]
+  from = "/api/explain-clause"
+  to = "/.netlify/functions/explain-clause"
+  status = 200
+
+[[redirects]]
+  from = "/api/documents/:id/download"
+  to = "/.netlify/functions/documents?id=:id&download=true"
+  status = 200
+
+[[redirects]]
+  from = "/api/documents/:id"
+  to = "/.netlify/functions/documents?id=:id"
+  status = 200
+
+[[redirects]]
+  from = "/api/documents"
+  to = "/.netlify/functions/documents"
+  status = 200
+
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/:splat"
+  status = 200
+
+# Client-side routing fallback for Single Page Application
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

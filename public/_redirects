@@ -1,0 +1,6 @@
+/api/documents/upload    /.netlify/functions/upload          200
+/api/analyze-contract    /.netlify/functions/analyze-contract 200
+/api/explain-clause      /.netlify/functions/explain-clause   200
+/api/documents           /.netlify/functions/documents        200
+/api/*                   /.netlify/functions/:splat           200
+/*                       /index.html                          200

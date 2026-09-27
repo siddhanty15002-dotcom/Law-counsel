@@ -225,114 +225,150 @@ async function startServer() {
     });
   });
 
-  // POST /api/documents/upload - Upload, validate, parse, and store contract documents (PDF, DOCX, TXT)
-  app.post('/api/documents/upload', async (req: Request, res: Response) => {
-    try {
-      const { fileName, fileBase64, mimeType } = req.body;
+  // POST upload - Upload, validate, parse, and store contract documents (PDF, DOCX, TXT)
+  app.post(
+    ['/api/documents/upload', '/.netlify/functions/upload', '/.netlify/functions/documents/upload'],
+    async (req: Request, res: Response) => {
+      try {
+        const { fileName, fileBase64, mimeType } = req.body;
 
-      // 1. Parameter Validation
-      if (!fileName || typeof fileName !== 'string' || !fileBase64 || typeof fileBase64 !== 'string') {
+        // 1. Parameter Validation
+        if (!fileName || typeof fileName !== 'string' || !fileBase64 || typeof fileBase64 !== 'string') {
+          return res.status(400).json({
+            error: 'Missing required parameters. Both fileName and fileBase64 must be provided.',
+          });
+        }
+
+        // 2. Decode Base64 and Check Empty
+        const cleanBase64 = fileBase64.replace(/^data:[^;]+;base64,/, '');
+        const buffer = Buffer.from(cleanBase64, 'base64');
+
+        if (buffer.length === 0) {
+          return res.status(400).json({
+            error: 'Uploaded file is empty (0 bytes). Please upload a valid document.',
+          });
+        }
+
+        // 3. File Size Validation (Max 15MB)
+        const MAX_FILE_SIZE = 15 * 1024 * 1024;
+        if (buffer.length > MAX_FILE_SIZE) {
+          const sizeMb = (buffer.length / (1024 * 1024)).toFixed(2);
+          return res.status(413).json({
+            error: `File size exceeds the 15MB limit (${sizeMb}MB). Please upload a smaller document.`,
+          });
+        }
+
+        // 4. File Extension & MIME Validation
+        const ext = path.extname(fileName).toLowerCase();
+        const allowedExts = ['.pdf', '.docx', '.doc', '.txt'];
+        if (!allowedExts.includes(ext)) {
+          return res.status(400).json({
+            error: `Unsupported file extension (${ext || 'none'}). Supported formats are PDF (.pdf), Word documents (.docx), and Plain Text (.txt).`,
+          });
+        }
+
+        const resolvedMime =
+          mimeType ||
+          (ext === '.pdf'
+            ? 'application/pdf'
+            : ext === '.docx'
+            ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+            : 'text/plain');
+
+        // 5. Extract Text (with PDFParse and fallback OCR)
+        const extracted = await extractDocumentContent(buffer, fileName, resolvedMime);
+
+        if (!extracted.text || extracted.text.trim().length === 0) {
+          return res.status(422).json({
+            error: 'Could not extract readable text from the document. Please ensure the document is not an empty or password-protected PDF.',
+          });
+        }
+
+        // 6. Generate ID and Store on Disk
+        const docId = `doc_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+        const safeFileName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const diskFilename = `${docId}_${safeFileName}`;
+        const diskPath = path.join(UPLOADS_DIR, diskFilename);
+
+        fs.writeFileSync(diskPath, buffer);
+
+        const wordCount = extracted.text.split(/\s+/).filter(Boolean).length;
+        const preview = extracted.text.slice(0, 300).trim();
+
+        const docRecord: StoredDocument = {
+          id: docId,
+          fileName,
+          originalName: fileName,
+          fileSize: buffer.length,
+          mimeType: resolvedMime,
+          uploadedAt: new Date().toISOString(),
+          extractedText: extracted.text,
+          pageCount: extracted.pages,
+          wordCount,
+          preview,
+          diskPath,
+        };
+
+        documentsStore.set(docId, docRecord);
+        persistDocumentsIndex();
+
+        return res.status(201).json({
+          id: docRecord.id,
+          fileName: docRecord.fileName,
+          fileSize: docRecord.fileSize,
+          mimeType: docRecord.mimeType,
+          uploadedAt: docRecord.uploadedAt,
+          extractedText: docRecord.extractedText,
+          pageCount: docRecord.pageCount,
+          wordCount: docRecord.wordCount,
+          preview: docRecord.preview,
+          downloadUrl: `/.netlify/functions/documents?id=${docRecord.id}&download=true`,
+          message: 'Document uploaded, stored, and parsed successfully.',
+        });
+      } catch (err: any) {
+        console.error('Error handling document upload:', err);
         return res.status(400).json({
-          error: 'Missing required parameters. Both fileName and fileBase64 must be provided.',
+          error: err.message || 'Failed to process document upload. Please try again.',
         });
       }
+    }
+  );
 
-      // 2. Decode Base64 and Check Empty
-      const cleanBase64 = fileBase64.replace(/^data:[^;]+;base64,/, '');
-      const buffer = Buffer.from(cleanBase64, 'base64');
+  // GET documents - List all stored documents or single document (supports /api/documents and /.netlify/functions/documents)
+  app.get(['/api/documents', '/.netlify/functions/documents'], (req: Request, res: Response) => {
+    const docId = req.query.id as string | undefined;
 
-      if (buffer.length === 0) {
-        return res.status(400).json({
-          error: 'Uploaded file is empty (0 bytes). Please upload a valid document.',
-        });
+    if (docId) {
+      const doc = documentsStore.get(docId);
+      if (!doc) {
+        return res.status(404).json({ error: 'Document not found.' });
       }
 
-      // 3. File Size Validation (Max 15MB)
-      const MAX_FILE_SIZE = 15 * 1024 * 1024;
-      if (buffer.length > MAX_FILE_SIZE) {
-        const sizeMb = (buffer.length / (1024 * 1024)).toFixed(2);
-        return res.status(413).json({
-          error: `File size exceeds the 15MB limit (${sizeMb}MB). Please upload a smaller document.`,
-        });
+      if (req.query.download === 'true' || req.query.action === 'download') {
+        if (!fs.existsSync(doc.diskPath)) {
+          return res.status(404).json({ error: 'Document file not found or removed.' });
+        }
+        res.setHeader('Content-Type', doc.mimeType || 'application/octet-stream');
+        res.setHeader(
+          'Content-Disposition',
+          `inline; filename="${encodeURIComponent(doc.fileName)}"`
+        );
+        return res.sendFile(path.resolve(doc.diskPath));
       }
 
-      // 4. File Extension & MIME Validation
-      const ext = path.extname(fileName).toLowerCase();
-      const allowedExts = ['.pdf', '.docx', '.doc', '.txt'];
-      if (!allowedExts.includes(ext)) {
-        return res.status(400).json({
-          error: `Unsupported file extension (${ext || 'none'}). Supported formats are PDF (.pdf), Word documents (.docx), and Plain Text (.txt).`,
-        });
-      }
-
-      const resolvedMime =
-        mimeType ||
-        (ext === '.pdf'
-          ? 'application/pdf'
-          : ext === '.docx'
-          ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-          : 'text/plain');
-
-      // 5. Extract Text (with PDFParse and fallback OCR)
-      const extracted = await extractDocumentContent(buffer, fileName, resolvedMime);
-
-      if (!extracted.text || extracted.text.trim().length === 0) {
-        return res.status(422).json({
-          error: 'Could not extract readable text from the document. Please ensure the document is not an empty or password-protected PDF.',
-        });
-      }
-
-      // 6. Generate ID and Store on Disk
-      const docId = `doc_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-      const safeFileName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
-      const diskFilename = `${docId}_${safeFileName}`;
-      const diskPath = path.join(UPLOADS_DIR, diskFilename);
-
-      fs.writeFileSync(diskPath, buffer);
-
-      const wordCount = extracted.text.split(/\s+/).filter(Boolean).length;
-      const preview = extracted.text.slice(0, 300).trim();
-
-      const docRecord: StoredDocument = {
-        id: docId,
-        fileName,
-        originalName: fileName,
-        fileSize: buffer.length,
-        mimeType: resolvedMime,
-        uploadedAt: new Date().toISOString(),
-        extractedText: extracted.text,
-        pageCount: extracted.pages,
-        wordCount,
-        preview,
-        diskPath,
-      };
-
-      documentsStore.set(docId, docRecord);
-      persistDocumentsIndex();
-
-      return res.status(201).json({
-        id: docRecord.id,
-        fileName: docRecord.fileName,
-        fileSize: docRecord.fileSize,
-        mimeType: docRecord.mimeType,
-        uploadedAt: docRecord.uploadedAt,
-        extractedText: docRecord.extractedText,
-        pageCount: docRecord.pageCount,
-        wordCount: docRecord.wordCount,
-        preview: docRecord.preview,
-        downloadUrl: `/api/documents/${docRecord.id}/download`,
-        message: 'Document uploaded, stored, and parsed successfully.',
-      });
-    } catch (err: any) {
-      console.error('Error handling document upload:', err);
-      return res.status(400).json({
-        error: err.message || 'Failed to process document upload. Please try again.',
+      return res.json({
+        id: doc.id,
+        fileName: doc.fileName,
+        fileSize: doc.fileSize,
+        mimeType: doc.mimeType,
+        uploadedAt: doc.uploadedAt,
+        extractedText: doc.extractedText,
+        pageCount: doc.pageCount,
+        wordCount: doc.wordCount,
+        downloadUrl: `/.netlify/functions/documents?id=${doc.id}&download=true`,
       });
     }
-  });
 
-  // GET /api/documents - List all stored documents
-  app.get('/api/documents', (_req: Request, res: Response) => {
     const list = Array.from(documentsStore.values())
       .sort((a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime())
       .map((doc) => ({
@@ -344,7 +380,7 @@ async function startServer() {
         pageCount: doc.pageCount,
         wordCount: doc.wordCount,
         preview: doc.preview,
-        downloadUrl: `/api/documents/${doc.id}/download`,
+        downloadUrl: `/.netlify/functions/documents?id=${doc.id}&download=true`,
       }));
     res.json(list);
   });
@@ -364,7 +400,7 @@ async function startServer() {
       extractedText: doc.extractedText,
       pageCount: doc.pageCount,
       wordCount: doc.wordCount,
-      downloadUrl: `/api/documents/${doc.id}/download`,
+      downloadUrl: `/.netlify/functions/documents?id=${doc.id}&download=true`,
     });
   });
 
@@ -383,9 +419,13 @@ async function startServer() {
     res.sendFile(path.resolve(doc.diskPath));
   });
 
-  // DELETE /api/documents/:id - Delete a stored document
-  app.delete('/api/documents/:id', (req: Request, res: Response) => {
-    const doc = documentsStore.get(req.params.id);
+  // DELETE document
+  app.delete(['/api/documents/:id', '/.netlify/functions/documents'], (req: Request, res: Response) => {
+    const docId = req.params.id || (req.query.id as string);
+    if (!docId) {
+      return res.status(400).json({ error: 'Document ID is required.' });
+    }
+    const doc = documentsStore.get(docId);
     if (!doc) {
       return res.status(404).json({ error: 'Document not found.' });
     }
@@ -393,7 +433,7 @@ async function startServer() {
       if (fs.existsSync(doc.diskPath)) {
         fs.unlinkSync(doc.diskPath);
       }
-      documentsStore.delete(req.params.id);
+      documentsStore.delete(docId);
       persistDocumentsIndex();
       res.json({ success: true, message: 'Document deleted successfully.' });
     } catch (err: any) {
@@ -401,8 +441,8 @@ async function startServer() {
     }
   });
 
-  // POST /api/analyze-contract
-  app.post('/api/analyze-contract', async (req: Request, res: Response) => {
+  // POST /api/analyze-contract & /.netlify/functions/analyze-contract
+  app.post(['/api/analyze-contract', '/.netlify/functions/analyze-contract'], async (req: Request, res: Response) => {
     try {
       const { contractText, category } = req.body;
       if (!contractText || typeof contractText !== 'string' || contractText.trim().length < 20) {
@@ -505,8 +545,8 @@ Your task:
     }
   });
 
-  // POST /api/explain-clause
-  app.post('/api/explain-clause', async (req: Request, res: Response) => {
+  // POST /api/explain-clause & /.netlify/functions/explain-clause
+  app.post(['/api/explain-clause', '/.netlify/functions/explain-clause'], async (req: Request, res: Response) => {
     try {
       const { clauseText, queryType } = req.body;
       if (!clauseText || typeof clauseText !== 'string' || clauseText.trim().length < 5) {
